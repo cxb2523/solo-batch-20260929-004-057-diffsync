@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>DiffSync Diff Report</title>
+<style>
+  body { font-family: -apple-system, "Segoe UI", sans-serif; margin: 2rem auto; max-width: 960px; color: #1f2328; }
+  h1 { border-bottom: 2px solid #d0d7de; padding-bottom: .3rem; }
+  .badge { color: #fff; border-radius: 4px; padding: 1px 8px; font-size: .8em; }
+  .bar-row { display: flex; align-items: center; gap: .6rem; margin: .25rem 0; }
+  .bar-label { width: 6.5rem; text-align: right; font-weight: 600; }
+  .bar-track { flex: 1; background: #eaeef2; border-radius: 4px; height: 1.1rem; }
+  .bar-fill { height: 100%; border-radius: 4px; min-width: 2px; }
+  .bar-count { width: 3rem; }
+  ul { list-style: none; border-left: 2px solid #d0d7de; margin-left: .6rem; padding-left: 1rem; }
+  li { margin: .35rem 0; }
+  table.attrs { border-collapse: collapse; margin: .3rem 0 .3rem 1rem; font-size: .85em; }
+  table.attrs td { border: 1px solid #d0d7de; padding: 2px 8px; }
+  pre { background: #f6f8fa; padding: 1rem; border-radius: 6px; overflow-x: auto; }
+  section { margin-bottom: 2.5rem; }
+</style>
+</head>
+<body>
+<h1>DiffSync Diff Report</h1>
+<p>Diff calculated from <strong>source</strong> (source) to <strong>dest</strong> (dest).</p>
+<section>
+  <h2>Action distribution</h2>
+  <div class="bar-row"><span class="bar-label">create</span><div class="bar-track"><div class="bar-fill" style="width:45.5%;background:#2da44e"></div></div><span class="bar-count">5</span></div><div class="bar-row"><span class="bar-label">update</span><div class="bar-track"><div class="bar-fill" style="width:18.2%;background:#bf8700"></div></div><span class="bar-count">2</span></div><div class="bar-row"><span class="bar-label">delete</span><div class="bar-track"><div class="bar-fill" style="width:18.2%;background:#cf222e"></div></div><span class="bar-count">2</span></div><div class="bar-row"><span class="bar-label">no-change</span><div class="bar-track"><div class="bar-fill" style="width:18.2%;background:#6e7781"></div></div><span class="bar-count">2</span></div>
+</section>
+<section>
+  <h2>Children tree</h2>
+  <ul><li><span class="badge" style="background:#bf8700">update</span> <strong>site</strong> nyc<table class="attrs"><tr><td>region</td><td>dest</td><td>&#x27;us-east-1&#x27;</td></tr><tr><td>region</td><td>source</td><td>&#x27;us-east&#x27;</td></tr></table><ul><li><span class="badge" style="background:#6e7781">no-change</span> <strong>device</strong> nyc-spine1<ul><li><span class="badge" style="background:#6e7781">no-change</span> <strong>interface</strong> eth0</li><li><span class="badge" style="background:#bf8700">update</span> <strong>interface</strong> eth1<table class="attrs"><tr><td>description</td><td>dest</td><td>&#x27;STALE uplink&#x27;</td></tr><tr><td>enabled</td><td>dest</td><td>False</td></tr><tr><td>description</td><td>source</td><td>&#x27;uplink to leaf1&#x27;</td></tr><tr><td>enabled</td><td>source</td><td>True</td></tr></table></li></ul></li><li><span class="badge" style="background:#2da44e">create</span> <strong>device</strong> nyc-leaf1<table class="attrs"><tr><td>role</td><td>source</td><td>&#x27;leaf&#x27;</td></tr></table><ul><li><span class="badge" style="background:#2da44e">create</span> <strong>interface</strong> eth0<table class="attrs"><tr><td>description</td><td>source</td><td>&#x27;uplink to spine1&#x27;</td></tr><tr><td>enabled</td><td>source</td><td>True</td></tr></table></li></ul></li><li><span class="badge" style="background:#cf222e">delete</span> <strong>device</strong> nyc-oldtor<table class="attrs"><tr><td>role</td><td>dest</td><td>&#x27;tor&#x27;</td></tr></table><ul><li><span class="badge" style="background:#cf222e">delete</span> <strong>interface</strong> eth0<table class="attrs"><tr><td>description</td><td>dest</td><td>&#x27;decommissioned&#x27;</td></tr><tr><td>enabled</td><td>dest</td><td>False</td></tr></table></li></ul></li></ul></li><li><span class="badge" style="background:#2da44e">create</span> <strong>site</strong> sfo<table class="attrs"><tr><td>region</td><td>source</td><td>&#x27;us-west&#x27;</td></tr></table><ul><li><span class="badge" style="background:#2da44e">create</span> <strong>device</strong> sfo-spine1<table class="attrs"><tr><td>role</td><td>source</td><td>&#x27;spine&#x27;</td></tr></table><ul><li><span class="badge" style="background:#2da44e">create</span> <strong>interface</strong> eth0<table class="attrs"><tr><td>description</td><td>source</td><td>&#x27;uplink to core&#x27;</td></tr><tr><td>enabled</td><td>source</td><td>False</td></tr></table></li></ul></li></ul></li></ul>
+</section>
+<section>
+  <h2>Serialized diff (dict())</h2>
+  <pre>{
+  &quot;site&quot;: {
+    &quot;nyc&quot;: {
+      &quot;-&quot;: {
+        &quot;region&quot;: &quot;us-east-1&quot;
+      },
+      &quot;+&quot;: {
+        &quot;region&quot;: &quot;us-east&quot;
+      },
+      &quot;device&quot;: {
+        &quot;nyc-spine1&quot;: {
+          &quot;-&quot;: {},
+          &quot;+&quot;: {},
+          &quot;interface&quot;: {
+            &quot;eth1&quot;: {
+              &quot;-&quot;: {
+                &quot;description&quot;: &quot;STALE uplink&quot;,
+                &quot;enabled&quot;: false
+              },
+              &quot;+&quot;: {
+                &quot;description&quot;: &quot;uplink to leaf1&quot;,
+                &quot;enabled&quot;: true
+              }
+            }
+          }
+        },
+        &quot;nyc-leaf1&quot;: {
+          &quot;+&quot;: {
+            &quot;role&quot;: &quot;leaf&quot;
+          },
+          &quot;interface&quot;: {
+            &quot;eth0&quot;: {
+              &quot;+&quot;: {
+                &quot;description&quot;: &quot;uplink to spine1&quot;,
+                &quot;enabled&quot;: true
+              }
+            }
+          }
+        },
+        &quot;nyc-oldtor&quot;: {
+          &quot;-&quot;: {
+            &quot;role&quot;: &quot;tor&quot;
+          },
+          &quot;interface&quot;: {
+            &quot;eth0&quot;: {
+              &quot;-&quot;: {
+                &quot;description&quot;: &quot;decommissioned&quot;,
+                &quot;enabled&quot;: false
+              }
+            }
+          }
+        }
+      }
+    },
+    &quot;sfo&quot;: {
+      &quot;+&quot;: {
+        &quot;region&quot;: &quot;us-west&quot;
+      },
+      &quot;device&quot;: {
+        &quot;sfo-spine1&quot;: {
+          &quot;+&quot;: {
+            &quot;role&quot;: &quot;spine&quot;
+          },
+          &quot;interface&quot;: {
+            &quot;eth0&quot;: {
+              &quot;+&quot;: {
+                &quot;description&quot;: &quot;uplink to core&quot;,
+                &quot;enabled&quot;: false
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}</pre>
+</section>
+</body>
+</html>

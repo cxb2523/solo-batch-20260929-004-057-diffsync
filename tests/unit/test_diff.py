@@ -15,6 +15,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
+import json
+
 import pytest
 
 from diffsync.diff import Diff, DiffElement
@@ -165,3 +167,116 @@ def test_order_children_custom(backend_a, backend_b):
     children = diff_a_b.get_children()
     children_names = [child.name for child in children]
     assert children_names == ["sfo", "rdu", "nyc", "atl"]
+
+
+def test_diff_add_same_path_create_then_update():
+    """A create record followed by an update record for the same path merges into a single create."""
+    diff = Diff()
+
+    create_element = DiffElement("device", "device1", {"name": "device1"})
+    create_element.add_attrs(source={"role": "switch"})
+    create_child = DiffElement("interface", "eth0", {"device_name": "device1", "name": "eth0"})
+    create_child.add_attrs(source={"description": "first"})
+    create_element.add_child(create_child)
+    diff.add(create_element)
+
+    update_element = DiffElement("device", "device1", {"name": "device1"})
+    update_element.add_attrs(source={"role": "router"}, dest={"role": "switch"})
+    update_child = DiffElement("interface", "eth1", {"device_name": "device1", "name": "eth1"})
+    update_child.add_attrs(source={"description": "second"})
+    update_element.add_child(update_child)
+    diff.add(update_element)  # must not raise ObjectAlreadyExists
+
+    # A single element remains mounted at the device/device1 path
+    assert list(diff.children["device"].keys()) == ["device1"]
+    merged = diff.children["device"]["device1"]
+    # The object still does not exist on the dest side: it stays a create, with the latest source attrs
+    assert merged.action == "create"
+    assert merged.source_attrs == {"role": "router"}
+    assert merged.dest_attrs is None
+    # Child subtrees from both records are merged, not overwritten
+    assert list(merged.child_diff.children["interface"].keys()) == ["eth0", "eth1"]
+
+    # Re-adding the exact same element object is still an error
+    with pytest.raises(ObjectAlreadyExists):
+        diff.add(merged)
+
+
+def test_diff_dict_excludes_action_none_elements():
+    """Elements with action None and no child diffs are excluded from dict()/from_dict()."""
+    diff = Diff()
+    no_change = DiffElement("device", "device1", {"name": "device1"})
+    no_change.add_attrs(source={"role": "switch"}, dest={"role": "switch"})
+    diff.add(no_change)
+
+    assert diff.dict() == {}
+    restored = Diff.from_dict(diff.dict())
+    assert not restored.has_diffs()
+    assert list(restored.get_children()) == []
+
+    # A no-change parent carrying child diffs keeps action None after a round-trip,
+    # so no spurious create/update would be dispatched to the store on replay.
+    diff = Diff()
+    parent = DiffElement("site", "site1", {"name": "site1"})
+    child = DiffElement("device", "device1", {"name": "device1"})
+    child.add_attrs(source={"role": "switch"})
+    parent.add_child(child)
+    diff.add(parent)
+
+    # The parent has no attrs sections at all in the serialized form
+    assert diff.dict() == {"site": {"site1": {"device": {"device1": {"+": {"role": "switch"}}}}}}
+
+    restored = Diff.from_dict(diff.dict())
+    restored_parent = restored.children["site"]["site1"]
+    assert restored_parent.action is None
+    assert restored_parent.source_attrs is None
+    assert restored_parent.dest_attrs is None
+    assert restored.summary() == diff.summary()
+    assert restored.dict() == diff.dict()
+
+    # A no-change leaf element (identical attrs on both sides, no child diffs) is not serialized
+    # at all, so it cannot be misjudged as a create/update after a round-trip.
+    equal_parent = DiffElement("site", "site2", {"name": "site2"})
+    equal_parent.add_attrs(source={"region": "east"}, dest={"region": "east"})
+    diff.add(equal_parent)
+    assert "site2" not in diff.dict()["site"]
+    restored = Diff.from_dict(diff.dict())
+    assert "site2" not in restored.children["site"]
+    assert restored.dict() == diff.dict()
+
+
+def test_diff_dict_from_dict_deep_nesting_roundtrip():
+    """A deeply nested Diff survives dict() -> from_dict() with actions and children intact."""
+    diff = Diff()
+
+    site = DiffElement("site", "nyc", {"name": "nyc"})
+    site.add_attrs(source={"region": "east"}, dest={"region": "west"})  # update
+    device = DiffElement("device", "nyc-spine1", {"name": "nyc-spine1"})
+    device.add_attrs(source={"role": "spine"})  # create
+    intf = DiffElement("interface", "eth0", {"device_name": "nyc-spine1", "name": "eth0"})
+    intf.add_attrs(source={"description": "new"}, dest={"description": "old"})  # update
+    loopback = DiffElement("interface", "lo0", {"device_name": "nyc-spine1", "name": "lo0"})
+    loopback.add_attrs(dest={"description": "Loopback"})  # delete
+    device.add_child(intf)
+    device.add_child(loopback)
+    site.add_child(device)
+    diff.add(site)
+
+    # Simulate persistence: the serialized form must survive a JSON round-trip
+    data = json.loads(json.dumps(diff.dict()))
+    restored = Diff.from_dict(data)
+
+    assert restored.dict() == data
+    restored_site = restored.children["site"]["nyc"]
+    assert restored_site.action == "update"
+    restored_device = restored_site.child_diff.children["device"]["nyc-spine1"]
+    assert restored_device.action == "create"
+    restored_intf = restored_device.child_diff.children["interface"]["eth0"]
+    assert restored_intf.action == "update"
+    assert restored_intf.source_attrs == {"description": "new"}
+    assert restored_intf.dest_attrs == {"description": "old"}
+    restored_loopback = restored_device.child_diff.children["interface"]["lo0"]
+    assert restored_loopback.action == "delete"
+
+    # A second round-trip is stable (idempotent)
+    assert Diff.from_dict(restored.dict()).dict() == data

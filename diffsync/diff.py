@@ -56,14 +56,48 @@ class Diff:
     def add(self, element: "DiffElement") -> None:
         """Add a new DiffElement to the changeset of this Diff.
 
+        If a *different* element of the same type and same name is already stored, the two elements
+        are merged (see DiffElement.merge()) instead of mounting a duplicate that would shadow the
+        existing one. This normalizes journal-style construction where the same path is recorded
+        multiple times (e.g. a "create" record followed by an "update" record).
+
         Raises:
-            ObjectAlreadyExists: if an element of the same type and same name is already stored.
+            ObjectAlreadyExists: if the exact same element object is added a second time.
         """
         # Note that element.name is usually a DiffSyncModel.shortname() -- i.e., NOT guaranteed globally unique!!
-        if element.name in self.children[element.type]:
+        existing = self.children[element.type].get(element.name)
+        if existing is not None:
+            if existing is not element:
+                existing.merge(element)
+                return
             raise ObjectAlreadyExists(f"Already storing a {element.type} named {element.name}", element)
 
         self.children[element.type][element.name] = element
+
+    @classmethod
+    def from_dict(
+        cls, data: Dict[StrType, Dict[StrType, Dict]], source_name: StrType = "source", dest_name: StrType = "dest"
+    ) -> "Diff":
+        """Rebuild a Diff from the dictionary representation produced by dict().
+
+        The parser is deliberately tolerant of missing fields ("+"/"-" attrs sections, child groups)
+        so that diffs persisted by older versions remain readable; elements reconstructed without
+        attrs sections end up with action None and therefore do not trigger spurious store writes.
+        """
+        diff = cls()
+        for obj_type, children in data.items():
+            for name, element_data in children.items():
+                diff.add(
+                    DiffElement.from_dict(
+                        obj_type,
+                        name,
+                        element_data,
+                        source_name=source_name,
+                        dest_name=dest_name,
+                        diff_class=cls,
+                    )
+                )
+        return diff
 
     def groups(self) -> List[StrType]:
         """Get the list of all group keys in self.children."""
@@ -310,6 +344,82 @@ class DiffElement:  # pylint: disable=too-many-instance-attributes
         Childs are saved in a Diff object and are organized by type and name.
         """
         self.child_diff.add(element)
+
+    def merge(self, other: "DiffElement") -> None:
+        """Merge another DiffElement for the same type+name path into this one.
+
+        Merge rules:
+            - A side recorded as absent (attrs is None) stays absent: a "create" record followed
+              by an "update" record for the same path therefore remains a "create" (the object
+              still does not exist on the destination side), just carrying the latest attr values.
+            - When both records have attrs for the same side, the newer record wins.
+            - Child diffs are merged recursively, so no subtree is ever dropped or shadowed.
+
+        Raises:
+            ValueError: if the other element describes a different type or name.
+        """
+        if self.type != other.type or self.name != other.name:
+            raise ValueError(f"Cannot merge {other.type}:{other.name} into {self.type}:{self.name}")
+
+        if self.source_attrs is not None and other.source_attrs is not None:
+            self.source_attrs = other.source_attrs
+        if self.dest_attrs is not None and other.dest_attrs is not None:
+            self.dest_attrs = other.dest_attrs
+
+        for child in other.get_children():
+            self.child_diff.add(child)
+
+    @classmethod
+    def from_dict(
+        cls,
+        obj_type: StrType,
+        name: StrType,
+        data: Dict,
+        source_name: StrType = "source",
+        dest_name: StrType = "dest",
+        diff_class: Type[Diff] = Diff,
+    ) -> "DiffElement":
+        """Rebuild a DiffElement from its dict() representation.
+
+        The "+"/"-" keys hold the source/dest attrs; every other key is a child type group.
+        Missing "+"/"-" sections are tolerated (attrs stay None, so the action property is
+        derived as None instead of being misjudged as a create/update), as are missing child
+        groups. Note that `keys` are not part of the serialized representation and default to {}.
+
+        Raises:
+            ValueError: if the serialized data is malformed.
+        """
+        if not isinstance(data, dict):
+            raise ValueError(f"Expected a dict to describe {obj_type}:{name}, got {type(data)}")
+
+        element = cls(
+            obj_type=obj_type,
+            name=name,
+            keys={},
+            source_name=source_name,
+            dest_name=dest_name,
+            diff_class=diff_class,
+        )
+        for key, value in data.items():
+            if key == "+":
+                element.source_attrs = dict(value)
+            elif key == "-":
+                element.dest_attrs = dict(value)
+            elif isinstance(value, dict):
+                for child_name, child_data in value.items():
+                    element.add_child(
+                        cls.from_dict(
+                            key,
+                            child_name,
+                            child_data,
+                            source_name=source_name,
+                            dest_name=dest_name,
+                            diff_class=diff_class,
+                        )
+                    )
+            else:
+                raise ValueError(f"Unexpected entry {key!r}: {value!r} in serialized {obj_type}:{name}")
+        return element
 
     def get_children(self) -> Iterator["DiffElement"]:
         """Iterate over all child DiffElements of this one."""
