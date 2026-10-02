@@ -54,7 +54,16 @@ def test_diff_element_str_with_no_diffs():
 
 def test_diff_element_dict_with_no_diffs():
     element = DiffElement("interface", "eth0", {"device_name": "device1", "name": "eth0"})
-    assert not element.dict()
+    assert element.dict() == {
+        "type": "interface",
+        "name": "eth0",
+        "keys": {"device_name": "device1", "name": "eth0"},
+        "source_name": "source",
+        "dest_name": "dest",
+        "source_attrs": None,
+        "dest_attrs": None,
+        "children": {},
+    }
 
 
 def test_diff_element_len_with_no_diffs():
@@ -111,9 +120,27 @@ interface: eth0
 def test_diff_element_dict_with_diffs():
     element = DiffElement("interface", "eth0", {"device_name": "device1", "name": "eth0"})
     element.add_attrs(source={"interface_type": "ethernet", "description": "my interface"})
-    assert element.dict() == {"+": {"description": "my interface", "interface_type": "ethernet"}}
+    assert element.dict() == {
+        "type": "interface",
+        "name": "eth0",
+        "keys": {"device_name": "device1", "name": "eth0"},
+        "source_name": "source",
+        "dest_name": "dest",
+        "source_attrs": {"description": "my interface", "interface_type": "ethernet"},
+        "dest_attrs": None,
+        "children": {},
+    }
     element.add_attrs(dest={"description": "your interface"})
-    assert element.dict() == {"-": {"description": "your interface"}, "+": {"description": "my interface"}}
+    assert element.dict() == {
+        "type": "interface",
+        "name": "eth0",
+        "keys": {"device_name": "device1", "name": "eth0"},
+        "source_name": "source",
+        "dest_name": "dest",
+        "source_attrs": {"description": "my interface", "interface_type": "ethernet"},
+        "dest_attrs": {"description": "your interface"},
+        "children": {},
+    }
 
 
 def test_diff_element_len_with_diffs():
@@ -126,9 +153,27 @@ def test_diff_element_len_with_diffs():
 def test_diff_element_dict_with_diffs_no_attrs():
     element = DiffElement("interface", "eth0", {"device_name": "device1", "name": "eth0"})
     element.add_attrs(source={})
-    assert element.dict() == {"+": {}}
+    assert element.dict() == {
+        "type": "interface",
+        "name": "eth0",
+        "keys": {"device_name": "device1", "name": "eth0"},
+        "source_name": "source",
+        "dest_name": "dest",
+        "source_attrs": {},
+        "dest_attrs": None,
+        "children": {},
+    }
     element.add_attrs(dest={})
-    assert element.dict() == {"+": {}, "-": {}}
+    assert element.dict() == {
+        "type": "interface",
+        "name": "eth0",
+        "keys": {"device_name": "device1", "name": "eth0"},
+        "source_name": "source",
+        "dest_name": "dest",
+        "source_attrs": {},
+        "dest_attrs": {},
+        "children": {},
+    }
 
 
 def test_diff_element_children():
@@ -176,12 +221,47 @@ device: device1
 
 def test_diff_element_dict_with_child_diffs(diff_element_with_children):
     assert diff_element_with_children.dict() == {
-        "-": {"role": "router"},
-        "+": {"role": "switch"},
-        "interface": {
-            "eth0": {"-": {"description": "your interface"}, "+": {"description": "my interface"}},
-            "lo0": {"+": {}},
-            "lo1": {"-": {"description": "Loopback 1"}},
+        "type": "device",
+        "name": "device1",
+        "keys": {"name": "device1"},
+        "source_name": "source",
+        "dest_name": "dest",
+        "source_attrs": {"role": "switch", "location": "RTP"},
+        "dest_attrs": {"role": "router", "location": "RTP"},
+        "children": {
+            "interface": {
+                "eth0": {
+                    "type": "interface",
+                    "name": "eth0",
+                    "keys": {"device_name": "device1", "name": "eth0"},
+                    "source_name": "source",
+                    "dest_name": "dest",
+                    "source_attrs": {"interface_type": "ethernet", "description": "my interface"},
+                    "dest_attrs": {"description": "your interface"},
+                    "children": {},
+                },
+                "lo0": {
+                    "type": "interface",
+                    "name": "lo0",
+                    "keys": {"device_name": "device1", "name": "lo0"},
+                    "source_name": "source",
+                    "dest_name": "dest",
+                    "source_attrs": {},
+                    "dest_attrs": None,
+                    "children": {},
+                },
+                "lo1": {
+                    "type": "interface",
+                    "name": "lo1",
+                    "keys": {"device_name": "device1", "name": "lo1"},
+                    "source_name": "source",
+                    "dest_name": "dest",
+                    "source_attrs": None,
+                    "dest_attrs": {"description": "Loopback 1"},
+                    "children": {},
+                },
+                # child lo100 has no diffs and is therefore omitted
+            }
         },
     }
 

@@ -65,3 +65,11 @@ class DiffException(Exception):
 
 class DiffClassMismatch(DiffException):
     """Exception raised when a diff object is not the same as the expected diff_class."""
+
+
+class DiffDeserializationError(DiffException):
+    """Exception raised when a serialized Diff cannot be deserialized.
+
+    Raised, for example, when the data is missing the version marker introduced for round-trip
+    serialization (an older, display-only ``Diff.dict()`` format) or carries an unsupported version.
+    """

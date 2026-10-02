@@ -19,12 +19,16 @@ from functools import total_ordering
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Type
 
 from .enum import DiffSyncActions
-from .exceptions import ObjectAlreadyExists
+from .exceptions import DiffDeserializationError, ObjectAlreadyExists
 from .utils import OrderedDefaultDict, intersection
 
 # This workaround is used because we are defining a method called `str` in our class definition, which therefore renders
 # the builtin `str` type unusable.
 StrType = str
+
+# Version of the self-describing, round-trippable serialization produced by Diff.dict()/DiffElement.dict().
+# Bump this whenever the on-dict shape changes in a way that older code cannot safely read.
+DIFF_VERSION = 1
 
 
 class Diff:
@@ -56,12 +60,22 @@ class Diff:
     def add(self, element: "DiffElement") -> None:
         """Add a new DiffElement to the changeset of this Diff.
 
+        If an element of the same type and name was previously added (for example, a "create" record
+        that is later supplemented with the destination attributes and therefore becomes an
+        "update"), the new element is merged into the existing one -- its missing source/dest
+        attributes are filled in and its child elements are merged recursively -- rather than
+        overwriting the existing element (and silently dropping its children).
+
         Raises:
-            ObjectAlreadyExists: if an element of the same type and same name is already stored.
+            ObjectAlreadyExists: if an element of the same type and same name is already stored and
+                the new element contributes no additional information.
         """
         # Note that element.name is usually a DiffSyncModel.shortname() -- i.e., NOT guaranteed globally unique!!
-        if element.name in self.children[element.type]:
-            raise ObjectAlreadyExists(f"Already storing a {element.type} named {element.name}", element)
+        existing = self.children[element.type].get(element.name)
+        if existing is not None:
+            if not existing.merge(element):
+                raise ObjectAlreadyExists(f"Already storing a {element.type} named {element.name}", existing)
+            return
 
         self.children[element.type][element.name] = element
 
@@ -147,13 +161,85 @@ class Diff:
             result = "(no diffs)"
         return result
 
-    def dict(self) -> Dict[StrType, Dict[StrType, Dict]]:
-        """Build a dictionary representation of this Diff."""
+    def dict(self) -> Dict[StrType, Any]:
+        """Build a self-describing, round-trippable dictionary representation of this Diff.
+
+        The output is an explicitly versioned envelope::
+
+            {"version": 1, "diff": {<type>: {<name>: <element-dict>, ...}, ...}}
+
+        Only elements that actually contain a diff (directly or via their children) are included;
+        elements with an ``action`` of ``None`` and without any diffing children are omitted so that
+        replaying a deserialized Diff does not issue spurious writes.
+
+        Use :meth:`from_dict` to reconstruct a Diff from this representation.
+        """
         result = OrderedDefaultDict[str, Dict](dict)
         for child in self.get_children():
             if child.has_diffs(include_children=True):
                 result[child.type][child.name] = child.dict()
-        return dict(result)
+        return {"version": DIFF_VERSION, "diff": dict(result)}
+
+    @classmethod
+    def from_dict(
+        cls,
+        data: Dict[StrType, Any],
+        *,
+        source_name: Optional[StrType] = None,
+        dest_name: Optional[StrType] = None,
+    ) -> "Diff":
+        """Reconstruct a Diff from data previously produced by :meth:`dict`.
+
+        Args:
+            data: Dictionary as produced by :meth:`Diff.dict`.
+            source_name: Optional override for the source adapter name recorded on every element.
+            dest_name: Optional override for the destination adapter name recorded on every element.
+
+        Raises:
+            DiffDeserializationError: if ``data`` is not a versioned Diff dictionary -- for example,
+                if it uses the older unversioned/display-only dict shape, is missing required fields,
+                or carries an unsupported ``version``. Old files fail loudly here rather than being
+                silently misread and replayed as bogus creates/updates.
+        """
+        cls._require_versioned_payload(data, context="Diff")
+
+        diff = cls()
+        children = data["diff"]
+        if not isinstance(children, dict):
+            raise DiffDeserializationError('invalid serialized Diff: "diff" must be a dictionary')
+        for obj_type, by_name in children.items():
+            if not isinstance(by_name, dict):
+                raise DiffDeserializationError(f'invalid serialized Diff group "{obj_type}": expected a dictionary')
+            for name, element_data in by_name.items():
+                # The outer (type, name) keys are authoritative; cross-check them against the payload.
+                element = DiffElement.from_dict(
+                    element_data,
+                    obj_type=obj_type,
+                    name=name,
+                    diff_class=cls,
+                    source_name=source_name,
+                    dest_name=dest_name,
+                )
+                diff.add(element)
+        return diff
+
+    @staticmethod
+    def _require_versioned_payload(data: Any, context: StrType) -> None:
+        """Validate that ``data`` is a versioned Diff payload and not legacy/display-only data."""
+        if not isinstance(data, dict):
+            raise DiffDeserializationError(
+                f"cannot deserialize {context} from {type(data).__name__}: expected a dictionary"
+            )
+        if "version" not in data:
+            raise DiffDeserializationError(
+                "unversioned Diff data is not supported; this looks like a legacy "
+                '(display-only) Diff.dict() format - expected a {"version": ..., ...} envelope'
+            )
+        version = data["version"]
+        if version != DIFF_VERSION:
+            raise DiffDeserializationError(
+                f"unsupported Diff serialization version {version!r}; expected {DIFF_VERSION}"
+            )
 
 
 @total_ordering
@@ -311,6 +397,63 @@ class DiffElement:  # pylint: disable=too-many-instance-attributes
         """
         self.child_diff.add(element)
 
+    def merge(self, other: "DiffElement") -> bool:
+        """Merge another DiffElement describing the same object (same type/name/keys) into this one.
+
+        This normalizes records accumulated over time for the same path -- e.g. an element first
+        logged as a "create" (source attrs only) and later augmented with the destination attrs,
+        turning it into an "update". Missing source/dest attributes are filled in from ``other``
+        and child elements are merged recursively, so previously attached children are preserved
+        instead of being overwritten.
+
+        Args:
+            other: Another DiffElement with the same type, name and ``keys``.
+
+        Returns:
+            True if ``other`` contributed new information, False if it was entirely redundant.
+
+        Raises:
+            ValueError: if ``other`` does not describe the same object (different keys) or if the
+                two elements carry conflicting values for the same attribute side.
+        """
+        if other.type != self.type or other.name != self.name or other.keys != self.keys:
+            raise ValueError(
+                f"cannot merge element {other.type}:{other.name} {other.keys} into "
+                f"{self.type}:{self.name} {self.keys}: type, name and keys must match"
+            )
+
+        changed = False
+        if other.source_attrs is not None:
+            if self.source_attrs is None:
+                self.source_attrs = other.source_attrs
+                changed = True
+            elif self.source_attrs != other.source_attrs:
+                raise ValueError(
+                    f"conflicting source attributes for {self.type}:{self.name}: "
+                    f"{self.source_attrs} vs {other.source_attrs}"
+                )
+        if other.dest_attrs is not None:
+            if self.dest_attrs is None:
+                self.dest_attrs = other.dest_attrs
+                changed = True
+            elif self.dest_attrs != other.dest_attrs:
+                raise ValueError(
+                    f"conflicting dest attributes for {self.type}:{self.name}: "
+                    f"{self.dest_attrs} vs {other.dest_attrs}"
+                )
+
+        for other_child in other.get_children():
+            existing_child = self.child_diff.children[other_child.type].get(other_child.name)
+            if existing_child is None:
+                # New child: attach directly without going through add(), as add() would reject a
+                # genuinely new element only in error cases.
+                self.child_diff.children[other_child.type][other_child.name] = other_child
+                changed = True
+            else:
+                changed |= existing_child.merge(other_child)
+
+        return changed
+
     def get_children(self) -> Iterator["DiffElement"]:
         """Iterate over all child DiffElements of this one."""
         yield from self.child_diff.get_children()
@@ -377,14 +520,131 @@ class DiffElement:  # pylint: disable=too-many-instance-attributes
             result += " (no diffs)"
         return result
 
-    def dict(self) -> Dict[StrType, Dict[StrType, Any]]:
-        """Build a dictionary representation of this DiffElement and its children."""
-        attrs_diffs = self.get_attrs_diffs()
-        result = {}
-        if "-" in attrs_diffs:
-            result["-"] = attrs_diffs["-"]
-        if "+" in attrs_diffs:
-            result["+"] = attrs_diffs["+"]
-        if self.child_diff.has_diffs():
-            result.update(self.child_diff.dict())
+    def dict(self) -> Dict[StrType, Any]:
+        """Build a self-describing, round-trippable dictionary representation of this DiffElement.
+
+        Shape::
+
+            {
+                "type": <obj_type>,
+                "name": <name>,
+                "keys": {...identifiers...},
+                "source_name": <str>,
+                "dest_name": <str>,
+                "source_attrs": {...} or None,
+                "dest_attrs": {...} or None,
+                "children": {<type>: {<name>: <element-dict>, ...}, ...},
+            }
+
+        The full source/dest attribute sets (not just the diffing subset) are recorded so that
+        :meth:`from_dict` can reconstruct the exact :attr:`action`; an element whose ``action`` is
+        ``None`` and which has no diffing children is not emitted at all by :meth:`Diff.dict`.
+        """
+        children = self.child_diff.dict()["diff"]
+        result: Dict[StrType, Any] = {
+            "type": self.type,
+            "name": self.name,
+            "keys": dict(self.keys),
+            "source_name": self.source_name,
+            "dest_name": self.dest_name,
+            "source_attrs": dict(self.source_attrs) if self.source_attrs is not None else None,
+            "dest_attrs": dict(self.dest_attrs) if self.dest_attrs is not None else None,
+            "children": children,
+        }
         return result
+
+    @classmethod
+    def from_dict(
+        cls,
+        data: Dict[StrType, Any],
+        *,
+        obj_type: Optional[StrType] = None,
+        name: Optional[StrType] = None,
+        diff_class: Type[Diff] = Diff,
+        source_name: Optional[StrType] = None,
+        dest_name: Optional[StrType] = None,
+    ) -> "DiffElement":
+        """Reconstruct a DiffElement from data previously produced by :meth:`dict`.
+
+        Args:
+            data: Dictionary as produced by :meth:`DiffElement.dict`.
+            obj_type: Object type implied by the enclosing :meth:`Diff.from_dict` group, if any.
+                Must agree with ``data["type"]`` when both are present.
+            name: Object name implied by the enclosing group, if any. Must agree with ``data["name"]``.
+            diff_class: Diff class (or subclass) used for the element's child diff.
+            source_name: Optional override for the source adapter name.
+            dest_name: Optional override for the destination adapter name.
+
+        Raises:
+            DiffDeserializationError: if ``data`` does not follow the versioned element schema,
+                uses the legacy ``{"-"/"+": ...}`` display shape, or has missing/conflicting fields.
+        """
+        if not isinstance(data, dict):
+            raise DiffDeserializationError(
+                f"cannot deserialize DiffElement from {type(data).__name__}: expected a dictionary"
+            )
+        # The legacy display shape only ever carries "-"/"+" attribute diffs and child groups,
+        # never the identifying "keys" field. Reject it explicitly instead of misreading it.
+        if "keys" not in data or "type" not in data or "name" not in data:
+            raise DiffDeserializationError(
+                'invalid serialized DiffElement: "type", "name" and "keys" are required; '
+                "an unversioned/legacy Diff dict cannot be replayed safely"
+            )
+
+        payload_type = data["type"]
+        payload_name = data["name"]
+        if obj_type is not None and obj_type != payload_type:
+            raise DiffDeserializationError(
+                f'type mismatch in serialized DiffElement: group says "{obj_type}", payload says "{payload_type}"'
+            )
+        if name is not None and name != payload_name:
+            raise DiffDeserializationError(
+                f'name mismatch in serialized DiffElement: group says "{name}", payload says "{payload_name}"'
+            )
+
+        keys = data["keys"]
+        if not isinstance(keys, dict):
+            raise DiffDeserializationError('invalid serialized DiffElement: "keys" must be a dictionary')
+
+        element_source_name = source_name or data.get("source_name", "source")
+        element_dest_name = dest_name or data.get("dest_name", "dest")
+
+        source_attrs = data.get("source_attrs")
+        dest_attrs = data.get("dest_attrs")
+        if source_attrs is not None and not isinstance(source_attrs, dict):
+            raise DiffDeserializationError('invalid serialized DiffElement: "source_attrs" must be a dict or null')
+        if dest_attrs is not None and not isinstance(dest_attrs, dict):
+            raise DiffDeserializationError('invalid serialized DiffElement: "dest_attrs" must be a dict or null')
+
+        children = data.get("children", {})
+        if not isinstance(children, dict):
+            raise DiffDeserializationError('invalid serialized DiffElement: "children" must be a dictionary')
+
+        element = cls(
+            obj_type=payload_type,
+            name=payload_name,
+            keys=keys,
+            source_name=element_source_name,
+            dest_name=element_dest_name,
+            diff_class=diff_class,
+        )
+        element.add_attrs(source=source_attrs, dest=dest_attrs)
+
+        for child_type, by_name in children.items():
+            if not isinstance(by_name, dict):
+                raise DiffDeserializationError(
+                    f'invalid serialized children group "{child_type}": expected a dictionary'
+                )
+            for child_name, child_data in by_name.items():
+                element.add_child(
+                    cls.from_dict(
+                        child_data,
+                        obj_type=child_type,
+                        name=child_name,
+                        diff_class=diff_class,
+                        source_name=source_name,
+                        dest_name=dest_name,
+                    )
+                )
+
+        return element
